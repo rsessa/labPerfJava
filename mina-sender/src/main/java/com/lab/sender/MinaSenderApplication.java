@@ -1,47 +1,63 @@
 package com.lab.sender;
 
+import java.net.InetSocketAddress;
+
+import org.apache.mina.core.buffer.IoBuffer;
 import org.apache.mina.core.future.ConnectFuture;
+import org.apache.mina.core.future.WriteFuture;
 import org.apache.mina.core.service.IoHandlerAdapter;
-import org.apache.mina.core.session.IoSession;
-import org.apache.mina.filter.codec.ProtocolCodecFilter;
-import org.apache.mina.filter.codec.textline.TextLineCodecFactory;
+import org.apache.mina.core.session.IoSession; // Opcional para depuración
 import org.apache.mina.transport.socket.nio.NioSocketConnector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+// import java.util.Arrays; // Descomentar si quieres rellenar el buffer con datos específicos
 
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-
-/**
- * Aplicación cliente que usa Apache MINA para enviar muchos mensajes TCP y
- * medir velocidad.
- */
 public class MinaSenderApplication {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MinaSenderApplication.class);
     private static final String HOST = "localhost";
     private static final int PORT = 12345;
-    private static final long CONNECT_TIMEOUT = 30000;
-    private static final int NUM_MESSAGES = 100000; // Número de mensajes a enviar
-    private static final String MESSAGE_PAYLOAD = "Este es un mensaje de prueba para medir velocidad.";
+    private static final int TOTAL_BYTES_TO_SEND = 82178160;
+    private static final long CONNECT_TIMEOUT = 30000; // 30 segundos
 
     public static void main(String[] args) {
-        LOGGER.info("🚀 Iniciando Cliente TCP Apache MINA para prueba de velocidad...");
+        LOGGER.info("🚀 Iniciando Cliente TCP Apache MINA para prueba de datos grandes...");
 
         NioSocketConnector connector = new NioSocketConnector();
         connector.setConnectTimeoutMillis(CONNECT_TIMEOUT);
 
-        TextLineCodecFactory codecFactory = new TextLineCodecFactory(
-                StandardCharsets.UTF_8, "\r\n", "\r\n");
-        connector.getFilterChain().addLast("codec", new ProtocolCodecFilter(codecFactory));
-        // Opcional: Descomenta para ver logs detallados de cada mensaje
+        // No se añaden codecs, MINA enviará IoBuffer directamente.
+        // No se configuran buffers explícitamente, MINA usará los del SO.
+
+        // LoggingFilter es opcional y puede ser MUY verboso con datos grandes.
+        // Coméntalo para pruebas de rendimiento puro si es necesario.
         // connector.getFilterChain().addLast("logger", new LoggingFilter());
 
         connector.setHandler(new IoHandlerAdapter() {
             @Override
-            public void exceptionCaught(IoSession session, Throwable cause) throws Exception {
-                LOGGER.error("❌ Error en MINA: {}", cause.getMessage());
+            public void sessionOpened(IoSession session) {
+                LOGGER.info("ℹ️ Sesión MINA abierta (ID: {}).", session.getId());
+                // Aquí podrías añadir el código para consultar los buffers de MINA
+                // si existiera una forma fácil en la API 2.x,
+                // pero como discutimos, no es directo.
+            }
+
+            @Override
+            public void exceptionCaught(IoSession session, Throwable cause) {
+                LOGGER.error("❌ Error en MINA (Sesión ID: {}): {}", session.getId(), cause.getMessage(), cause);
                 session.closeNow();
+            }
+
+            @Override
+            public void sessionClosed(IoSession session) {
+                LOGGER.info("🚪 Sesión MINA cerrada (ID: {}).", session.getId());
+            }
+            
+            @Override
+            public void messageSent(IoSession session, Object message) throws Exception {
+                // Se llama cuando MINA ha procesado el envío.
+                // No necesariamente significa que el receptor lo haya recibido.
+                // LOGGER.info("✈️  MINA ha procesado el envío de un buffer.");
             }
         });
 
@@ -53,46 +69,57 @@ public class MinaSenderApplication {
 
             if (future.isConnected()) {
                 session = future.getSession();
-                LOGGER.info("🔗 Conexión establecida. Sesión ID: {}. Iniciando envío...", session.getId());
+                LOGGER.info("🔗 Conexión establecida. Sesión ID: {}. Preparando y enviando datos...", session.getId());
 
+                byte[] largeDataArray = new byte[TOTAL_BYTES_TO_SEND];
+                // Opcional: Rellenar el array con datos, ej: Arrays.fill(largeDataArray, (byte) 'A');
+
+                IoBuffer ioBuffer = IoBuffer.allocate(TOTAL_BYTES_TO_SEND);
+                ioBuffer.put(largeDataArray);
+                ioBuffer.flip(); // Prepara el buffer para ser leído/enviado
+
+                LOGGER.info("Enviando {} bytes...", ioBuffer.remaining());
                 long startTime = System.nanoTime();
 
-                for (int i = 0; i < NUM_MESSAGES; i++) {
-                    session.write(MESSAGE_PAYLOAD + " #" + (i + 1));
+                WriteFuture writeFuture = session.write(ioBuffer);
+                writeFuture.awaitUninterruptibly(); // Espera a que la operación de escritura se complete (enviado al SO)
+
+                if (writeFuture.isWritten()) {
+                    long endTime = System.nanoTime();
+                    long duration = endTime - startTime;
+
+                    double durationSeconds = duration / 1_000_000_000.0;
+                    double megabytes = TOTAL_BYTES_TO_SEND / (1024.0 * 1024.0);
+                    double mbps = (durationSeconds > 0) ? megabytes / durationSeconds : 0;
+                    double mbitps = mbps * 8;
+
+                    LOGGER.info("-------------------------------------------------");
+                    LOGGER.info("📊 Envío de Bloque Completado:");
+                    LOGGER.info("   Bytes Totales Enviados: {}", TOTAL_BYTES_TO_SEND);
+                    LOGGER.info("   Tiempo Transcurrido: {} ms ({} s)", duration / 1_000_000, String.format("%.3f", durationSeconds));
+                    LOGGER.info("   Velocidad: {} MB/s ({} Mbps)", String.format("%.2f", mbps), String.format("%.2f", mbitps));
+                    LOGGER.info("-------------------------------------------------");
+                } else {
+                    LOGGER.error("🔥 Falló el envío del buffer.");
                 }
-                // Envía un mensaje final para indicar que hemos terminado
-                session.write("END_OF_TRANSMISSION").awaitUninterruptibly();
+                
+                // Damos tiempo para que los logs se procesen y para el cierre ordenado
+                try {
+                    Thread.sleep(1000); // Espera 1 segundo antes de cerrar
+                } catch (InterruptedException ignored) {}
+                
+                session.closeNow().awaitUninterruptibly();
 
-                long endTime = System.nanoTime();
-                long duration = endTime - startTime;
-                long totalBytes = (long) NUM_MESSAGES * MESSAGE_PAYLOAD.getBytes(StandardCharsets.UTF_8).length;
-
-                double durationSeconds = duration / 1_000_000_000.0;
-                double megabytes = totalBytes / (1024.0 * 1024.0);
-                double mbps = megabytes / durationSeconds;
-                double mbitps = mbps * 8;
-
-                LOGGER.info("-------------------------------------------------");
-                LOGGER.info("📊 Envío Completado:");
-                LOGGER.info("   Mensajes Enviados: {}", NUM_MESSAGES);
-                LOGGER.info("   Bytes Totales (aprox): {}", totalBytes);
-                LOGGER.info("   Tiempo Transcurrido: {} ms ({} s)", duration / 1_000_000,
-                        String.format("%.3f", durationSeconds));
-                LOGGER.info("   Velocidad: {} MB/s ({} Mbps)", String.format("%.2f", mbps),
-                        String.format("%.2f", mbitps));
-                LOGGER.info("-------------------------------------------------");
-
-                session.getCloseFuture().awaitUninterruptibly(5000);
             } else {
-                LOGGER.error("🔥 No se pudo conectar al servidor.");
+                 LOGGER.error("🔥 No se pudo conectar al servidor.");
             }
 
         } catch (Exception e) {
             LOGGER.error("🔥 Error durante la conexión o envío: {}", e.getMessage(), e);
         } finally {
-            if (session != null)
-                session.closeNow();
-            connector.dispose();
+            if (connector != null && !connector.isDisposed()) {
+                connector.dispose();
+            }
             LOGGER.info("🧹 Recursos del conector liberados.");
         }
     }
