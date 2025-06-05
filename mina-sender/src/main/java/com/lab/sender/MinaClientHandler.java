@@ -1,18 +1,23 @@
 package com.lab.sender;
 
+import org.apache.mina.core.buffer.IoBuffer;
 import org.apache.mina.core.service.IoHandlerAdapter;
 import org.apache.mina.core.session.IoSession;
 import org.apache.mina.core.session.IoSessionConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+
 public class MinaClientHandler extends IoHandlerAdapter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MinaClientHandler.class);
-    private final String messageToSend; // Este mensaje se enviará al abrir la sesión
+    // Ya no necesitamos messageToSend si no lo vamos a enviar desde aquí.
+    // Si lo dejas, asegúrate de que MinaSenderApplication lo pase como null o vacío.
+    // private final String messageToSend;
 
-    public MinaClientHandler(String messageToSend) {
-        this.messageToSend = messageToSend;
+    // Constructor modificado o usar el por defecto si messageToSend no se usa
+    public MinaClientHandler(/* String messageToSend */) {
+        // this.messageToSend = messageToSend;
     }
 
     @Override
@@ -28,17 +33,17 @@ public class MinaClientHandler extends IoHandlerAdapter {
         LOGGER.info("   -> Nota: Los buffers TCP del Socket real (SO_SNDBUF/SO_RCVBUF) usarán los defaults del SO.");
         LOGGER.info("-------------------------------------------------");
 
-        LOGGER.info("CLIENT HANDLER - ℹ️ Sesión MINA abierta (ID: {}). Enviando mensaje inicial...", session.getId());
-        if (this.messageToSend != null && !this.messageToSend.isEmpty()) {
-            session.write(this.messageToSend); // Envía el mensaje pequeño
-        }
+        LOGGER.info("CLIENT HANDLER - ℹ️ Sesión MINA abierta (ID: {}).", session.getId());
+        // NO ENVIAMOS NADA DESDE AQUÍ si el main se encarga del envío principal
+        // if (this.messageToSend != null && !this.messageToSend.isEmpty()) {
+        //     session.write(this.messageToSend); // Esto causaba el error sin un encoder para String
+        // }
     }
 
     @Override
     public void messageReceived(IoSession session, Object message) throws Exception {
         LOGGER.info("CLIENT HANDLER - 💬 Mensaje recibido del servidor: {}", message.toString());
-        // El cliente no espera respuestas en este escenario de envío masivo,
-        // pero si las hubiera, se manejarían aquí.
+        // El cliente no espera respuestas activamente en este escenario.
     }
 
     @Override
@@ -54,10 +59,12 @@ public class MinaClientHandler extends IoHandlerAdapter {
 
     @Override
     public void messageSent(IoSession session, Object message) throws Exception {
-        // Este se llamará para el messageToSend y para cada chunk del IoBuffer
-        // si no se usa un codec específico para el messageToSend que lo convierta a IoBuffer.
-        // Si messageToSend es un String y no hay un TextLineCodec, podría dar error o no llamarse.
-        // Para el IoBuffer, el LoggingFilter dará más info.
-        LOGGER.info("CLIENT HANDLER - ✈️  MINA ha procesado el envío de: {}", message.getClass().getSimpleName());
+        if (message instanceof IoBuffer ioBuffer) { // Usar pattern matching
+            LOGGER.info("CLIENT HANDLER - ✈️  MINA ha procesado el envío de: IoBuffer ({} bytes restantes en el buffer enviado)", ioBuffer.remaining());
+        } else if (message != null) {
+            LOGGER.info("CLIENT HANDLER - ✈️  MINA ha procesado el envío de: {}", message.toString());
+        } else {
+            LOGGER.info("CLIENT HANDLER - ✈️  MINA ha procesado el envío de un mensaje nulo.");
+        }
     }
 }
