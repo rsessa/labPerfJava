@@ -1,7 +1,5 @@
 package com.lab.sender;
 
-import java.net.InetSocketAddress;
-
 import org.apache.mina.core.buffer.IoBuffer;
 import org.apache.mina.core.future.ConnectFuture;
 import org.apache.mina.core.future.WriteFuture;
@@ -12,20 +10,25 @@ import org.apache.mina.transport.socket.nio.NioSocketConnector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.InetSocketAddress;
+// import java.util.Arrays; // Descomentar si quieres rellenar el buffer con datos específicos
+
 public class MinaSenderApplication {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MinaSenderApplication.class);
     private static final String HOST = "localhost";
     private static final int PORT = 12345;
     private static final int TOTAL_BYTES_TO_SEND = 82178160;
-    private static final long CONNECT_TIMEOUT = 30000;
+    private static final long CONNECT_TIMEOUT = 30000; // 30 segundos para conectar
+    private static final long WRITE_TIMEOUT = 90000;   // 90 segundos para que WriteFuture confirme
 
     public static void main(String[] args) {
-        LOGGER.info("🚀 Iniciando Cliente TCP Apache MINA (v. depuración envío)...");
+        LOGGER.info("🚀 Iniciando Cliente TCP Apache MINA (v. depuración envío con timeouts extendidos)...");
 
         NioSocketConnector connector = new NioSocketConnector();
         connector.setConnectTimeoutMillis(CONNECT_TIMEOUT);
-        connector.getFilterChain().addLast("logger", new LoggingFilter()); // Mantenemos el logger
+        // LoggingFilter es crucial para depurar qué se envía y cuándo
+        connector.getFilterChain().addLast("logger", new LoggingFilter());
 
         connector.setHandler(new IoHandlerAdapter() {
             @Override
@@ -36,7 +39,7 @@ public class MinaSenderApplication {
             @Override
             public void exceptionCaught(IoSession session, Throwable cause) {
                 MinaSenderApplication.LOGGER.error("CLIENT HANDLER - ❌ Error en MINA (Sesión ID: {}): {}", session.getId(), cause.getMessage(), cause);
-                session.close(true); // Usar close(true) para un cierre inmediato
+                session.close(true); // Cierre inmediato si hay error en el handler
             }
 
             @Override
@@ -46,9 +49,11 @@ public class MinaSenderApplication {
             
             @Override
             public void messageSent(IoSession session, Object message) throws Exception {
+                // Este log nos ayuda a ver si MINA considera que el mensaje (o parte de él) fue enviado
                 if (message instanceof IoBuffer) {
-                     // Este log es útil, pero puede ser que el WriteFuture ya nos dé la info
-                    MinaSenderApplication.LOGGER.info("CLIENT HANDLER - ✈️ MINA ha pasado un IoBuffer al procesador de E/S.");
+                    MinaSenderApplication.LOGGER.info("CLIENT HANDLER - ✈️ MINA ha procesado el envío de IoBuffer ({} bytes restantes en el buffer enviado).", ((IoBuffer)message).remaining());
+                } else {
+                    MinaSenderApplication.LOGGER.info("CLIENT HANDLER - ✈️ MINA ha procesado el envío de un mensaje: {}", message.toString());
                 }
             }
         });
@@ -57,19 +62,21 @@ public class MinaSenderApplication {
         try {
             LOGGER.info("🔌 Intentando conectar a {}:{}...", HOST, PORT);
             ConnectFuture connectFuture = connector.connect(new InetSocketAddress(HOST, PORT));
-            connectFuture.awaitUninterruptibly(); // Esperar a que la conexión se establezca
+            connectFuture.awaitUninterruptibly(); 
 
             if (!connectFuture.isConnected()) {
                 LOGGER.error("🔥 No se pudo conectar al servidor.");
-                connector.dispose();
-                return;
+                // No es necesario llamar a dispose() aquí si el conector no se usó realmente
+                // pero si se quiere ser exhaustivo:
+                // if (!connector.isDisposed()) { connector.dispose(); }
+                return; // Salir si no hay conexión
             }
 
             session = connectFuture.getSession();
             LOGGER.info("🔗 Conexión establecida. Sesión ID: {}. Preparando datos...", session.getId());
 
             byte[] largeDataArray = new byte[TOTAL_BYTES_TO_SEND];
-            // Arrays.fill(largeDataArray, (byte) 'A'); // Opcional
+            // Opcional: Rellenar el array, ej: Arrays.fill(largeDataArray, (byte) 'A');
             IoBuffer ioBuffer = IoBuffer.allocate(TOTAL_BYTES_TO_SEND).put(largeDataArray).flip();
 
             LOGGER.info("Enviando {} bytes...", ioBuffer.remaining());
@@ -77,54 +84,51 @@ public class MinaSenderApplication {
 
             WriteFuture writeFuture = session.write(ioBuffer);
             
-            // Esperar a que la escritura se complete o falle
-            // Un timeout aquí es buena idea para no bloquear indefinidamente
-            if (writeFuture.awaitUninterruptibly(CONNECT_TIMEOUT + 5000)) { // Espera un poco más que el timeout de conexión
+            // Esperar a que la escritura se complete o falle, con un timeout más largo
+            if (writeFuture.awaitUninterruptibly(WRITE_TIMEOUT)) { 
                 if (writeFuture.isWritten()) {
                     long endTime = System.nanoTime();
                     long duration = endTime - startTime;
-                    // ... (cálculos de velocidad como antes) ...
+                    double durationSeconds = duration / 1_000_000_000.0;
+                    double megabytes = TOTAL_BYTES_TO_SEND / (1024.0 * 1024.0);
+                    double mbps = (durationSeconds > 0) ? megabytes / durationSeconds : 0;
+                    double mbitps = mbps * 8;
+
                     LOGGER.info("-------------------------------------------------");
                     LOGGER.info("📊 Envío de Bloque (WriteFuture.isWritten() == true):");
-                    // ... (resto de los logs de estadísticas) ...
                     LOGGER.info("   Bytes Totales Enviados: {}", TOTAL_BYTES_TO_SEND);
-                    LOGGER.info("   Tiempo Transcurrido para write(): {} ms", duration / 1_000_000);
+                    LOGGER.info("   Tiempo Transcurrido para write(): {} ms ({} s)", duration / 1_000_000, String.format("%.3f", durationSeconds));
+                    LOGGER.info("   Velocidad (basada en write()): {} MB/s ({} Mbps)", String.format("%.2f", mbps), String.format("%.2f", mbitps));
                     LOGGER.info("-------------------------------------------------");
-
-                    // Después de un envío exitoso de un gran bloque, es común cerrar la conexión
-                    // si no se espera más interacción, o esperar una confirmación.
-                    // Por ahora, cerraremos desde el cliente después de enviar.
-                    LOGGER.info("Cliente: Envío completado según WriteFuture. Esperando un poco y cerrando sesión...");
-                    Thread.sleep(2000); // Da tiempo a que los datos fluyan y logs
-                    session.closeNow().awaitUninterruptibly(); // Cierre inmediato después de la escritura
-                    
                 } else {
                     LOGGER.error("🔥 Falló el envío del buffer (WriteFuture.isWritten() fue false).");
                     if (writeFuture.getException() != null) {
                         LOGGER.error("   Excepción en WriteFuture: ", writeFuture.getException());
                     }
-                     session.closeNow().awaitUninterruptibly(); // Cierra si falla
                 }
             } else {
-                LOGGER.error("🔥 Timeout esperando la confirmación de escritura del WriteFuture.");
-                session.closeNow().awaitUninterruptibly(); // Cierra si hay timeout
+                LOGGER.error("🔥 Timeout ({ } ms) esperando la confirmación de escritura del WriteFuture.", WRITE_TIMEOUT);
+            }
+
+            // Cierra la sesión explícitamente después de intentar el envío.
+            // El servidor debería detectar esto y procesar los bytes recibidos.
+            if (session != null && session.isConnected()) {
+                LOGGER.info("Cliente: Envío (o intento) completado. Cerrando sesión...");
+                // session.closeOnFlush().awaitUninterruptibly(); // Espera a que se envíe lo que quede y cierra
+                session.closeNow().awaitUninterruptibly(); // Cierra más inmediatamente
             }
 
         } catch (Exception e) {
             LOGGER.error("🔥 Error general en el cliente: {}", e.getMessage(), e);
-            if (session != null) {
+            if (session != null && session.isActive()) { // isActive() es mejor que isConnected() aquí
                 session.closeNow();
             }
         } finally {
             // Esperar a que todas las sesiones se cierren si no lo hemos hecho ya.
             // El dispose se encarga de limpiar los recursos del conector.
-            if (!connector.isDisposed()) {
+            if (connector != null && !connector.isDisposed()) {
                 LOGGER.info("Cliente: Limpiando y disponiendo del conector...");
-                // Esperamos a que el cierre de sesión de arriba se complete antes de disponer.
-                // connector.dispose(true); // 'true' para esperar que las sesiones se cierren.
-                                        // Esto puede ser redundante si ya cerramos la sesión explícitamente.
-                                        // Si la sesión se cierra en exceptionCaught, este dispose es importante.
-                connector.dispose(); // Intentemos un dispose simple
+                connector.dispose(true);  // 'true' para esperar a que las sesiones se cierren.
             }
             LOGGER.info("🧹 Cliente finalizado.");
         }
