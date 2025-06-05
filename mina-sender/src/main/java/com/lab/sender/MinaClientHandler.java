@@ -17,21 +17,21 @@ public class MinaClientHandler extends IoHandlerAdapter {
 
     @Override
     public void sessionOpened(IoSession session) throws Exception {
-        // Obtenemos la config de la sesión (aunque no podamos leer los buffers)
         IoSessionConfig config = session.getConfig();
 
         LOGGER.info("-------------------------------------------------");
-        LOGGER.info("ℹ️  Valores de Buffer TCP (MINA):");
-        LOGGER.info("   -> MINA usará los valores por defecto del SO, ya que");
-        LOGGER.info("   -> la API 2.x no permite leerlos fácilmente tras la conexión.");
+        LOGGER.info("ℹ️  MINA Session Configuration:");
+        LOGGER.info("   -> Read Buffer Size: {} bytes", config.getReadBufferSize());
+        LOGGER.info("   -> Min Read Buffer Size: {} bytes", config.getMinReadBufferSize());
+        LOGGER.info("   -> Max Read Buffer Size: {} bytes", config.getMaxReadBufferSize());
+        LOGGER.info("   -> Throughput Calculation Interval: {} seconds", config.getThroughputCalculationInterval());
+        LOGGER.info("   -> Note: Actual TCP socket buffers (SO_SNDBUF/SO_RCVBUF) use OS defaults");
         LOGGER.info("-------------------------------------------------");
 
-        LOGGER.info("ℹ️ Sesión MINA abierta (ID: {}). Enviando mensaje...", session.getId());
-        // Enviamos el mensaje
+        LOGGER.info("ℹ️ MINA session opened (ID: {}). Sending message...", session.getId());
         session.write(messageToSend);
     }
 
-    // ... (El resto de los métodos: messageReceived, exceptionCaught, etc., quedan igual) ...
     @Override
     public void messageReceived(IoSession session, Object message) throws Exception {
         LOGGER.info("💬 Mensaje recibido del servidor: {}", message.toString());

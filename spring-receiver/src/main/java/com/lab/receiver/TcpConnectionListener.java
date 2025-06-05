@@ -1,5 +1,7 @@
 package com.lab.receiver;
 
+import java.net.SocketException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationListener;
@@ -9,6 +11,10 @@ import org.springframework.integration.ip.tcp.connection.TcpConnectionOpenEvent;
 import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Component;
 
+/**
+ * Listens for TCP connection open events to display
+ * socket information, such as buffer sizes.
+ */
 @Component
 public class TcpConnectionListener implements ApplicationListener<TcpConnectionOpenEvent> {
 
@@ -23,14 +29,18 @@ public class TcpConnectionListener implements ApplicationListener<TcpConnectionO
             int receiveBuffer = socketInfo.getReceiveBufferSize();
 
             LOGGER.info("-------------------------------------------------");
-            LOGGER.info("ℹ️  Conexión TCP Abierta (Spring - ID: {})", event.getConnectionId());
-            LOGGER.info("   -> Host Remoto: {}:{}", connection.getHostAddress(), connection.getPort());
-            LOGGER.info("   -> Búfer de Envío (SO_SNDBUF):   {} bytes ({} KB)", sendBuffer, sendBuffer / 1024);
-            LOGGER.info("   -> Búfer de Recepción (SO_RCVBUF): {} bytes ({} KB)", receiveBuffer, receiveBuffer / 1024);
+            LOGGER.info("ℹ️  TCP Connection Opened (Spring - ID: {})", event.getConnectionId());
+            LOGGER.info("   -> Remote Host: {}:{}", connection.getHostAddress(), connection.getPort());
+            LOGGER.info("   -> Send Buffer (SO_SNDBUF):   {} bytes ({} KB)", sendBuffer, sendBuffer / 1024);
+            LOGGER.info("   -> Receive Buffer (SO_RCVBUF): {} bytes ({} KB)", receiveBuffer, receiveBuffer / 1024);
             LOGGER.info("-------------------------------------------------");
 
-        } catch (Exception e) {
-            LOGGER.warn("⚠️ No se pudieron obtener los tamaños de búfer para la conexión {}: {}", event.getConnectionId(), e.getMessage());
+        } catch (SocketException e) {
+            LOGGER.warn("⚠️ Socket exception while getting buffer sizes for connection {}: {}", event.getConnectionId(), e.getMessage());
+        } catch (UnsupportedOperationException e) {
+            LOGGER.warn("⚠️ Socket info not available for connection {}: {}", event.getConnectionId(), e.getMessage());
+        } catch (RuntimeException e) {
+            LOGGER.warn("⚠️ Could not get buffer sizes for connection {}: {}", event.getConnectionId(), e.getMessage());
         }
     }
 }
