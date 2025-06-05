@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.integration.annotation.ServiceActivator;
 import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.ip.tcp.TcpReceivingChannelAdapter;
@@ -23,11 +24,14 @@ public class TcpServerConfig {
     private static final Logger HANDLER_LOGGER = LoggerFactory.getLogger(TcpServerConfig.class.getName() + ".MessageHandler");
 
     private static final int PORT = 12345;
-    private static final int BUFFER_SIZE = 131072;
+    private static final int SPRING_BUFFER_SIZE = 131072; // Renombrado para claridad
     private static final long EXPECTED_TOTAL_BYTES = 82178160L;
+    // Tamaño máximo de mensaje para que ByteArrayRawSerializer emita un Message.
+    // Debe ser lo suficientemente grande para un chunk de MINA, o un poco más.
+    private static final int MAX_MESSAGE_SIZE_SERIALIZER = 131072; // Ej: 128 KB, el doble del chunk de MINA
 
     private final AtomicLong currentTotalBytesReceived = new AtomicLong(0);
-    private final AtomicInteger chunkCount = new AtomicInteger(0);
+    private final AtomicInteger individualChunkCounter = new AtomicInteger(0); // Renombrado para claridad
     private volatile long startTimeReception = 0;
 
     @Bean
@@ -35,21 +39,24 @@ public class TcpServerConfig {
         TcpNioServerConnectionFactory factory = new TcpNioServerConnectionFactory(PORT);
         
         ByteArrayRawSerializer serializer = new ByteArrayRawSerializer();
+        // *** CAMBIO IMPORTANTE: Establecer un maxMessageSize razonable ***
+        serializer.setMaxMessageSize(MAX_MESSAGE_SIZE_SERIALIZER); 
+
         factory.setSerializer(serializer);
         factory.setDeserializer(serializer);
         
         factory.setSoTimeout(60000); 
-        factory.setSoReceiveBufferSize(BUFFER_SIZE);
-        factory.setSoSendBufferSize(BUFFER_SIZE);
+        factory.setSoReceiveBufferSize(SPRING_BUFFER_SIZE);
+        factory.setSoSendBufferSize(SPRING_BUFFER_SIZE);
 
-        // Quitado el TaskExecutor para simplificar
-        // SimpleAsyncTaskExecutor taskExecutor = new SimpleAsyncTaskExecutor("tcp-server-io-");
-        // taskExecutor.setConcurrencyLimit(10); 
-        // factory.setTaskExecutor(taskExecutor);
+        SimpleAsyncTaskExecutor taskExecutor = new SimpleAsyncTaskExecutor("tcp-server-io-");
+        taskExecutor.setConcurrencyLimit(10); 
+        factory.setTaskExecutor(taskExecutor);
 
         CLASS_LOGGER.info("-> Fábrica de Conexiones TCP Creada en Puerto {} (Raw Serializer)", PORT);
-        CLASS_LOGGER.info("   -> Búfer Solicitado Envío/Recepción: {} bytes", BUFFER_SIZE);
+        CLASS_LOGGER.info("   -> Búfer Solicitado Envío/Recepción: {} bytes", SPRING_BUFFER_SIZE);
         CLASS_LOGGER.info("   -> SO_TIMEOUT: {} ms", factory.getSoTimeout());
+        CLASS_LOGGER.info("   -> RawSerializer MaxMessageSize: {} bytes", MAX_MESSAGE_SIZE_SERIALIZER);
         return factory;
     }
 
@@ -69,67 +76,62 @@ public class TcpServerConfig {
 
     @ServiceActivator(inputChannel = "inboundTcpChannel")
     public void handleMessage(Message<byte[]> message) {
-        byte[] chunk = message.getPayload();
-        long bytesInThisChunk = chunk.length;
-        // Este es el log más importante ahora:
-        HANDLER_LOGGER.info(">>> SERVER: handleMessage LLAMADO con un chunk de {} bytes", bytesInThisChunk);
+        byte[] chunkPayload = message.getPayload(); // Renombrado para claridad
+        long bytesInThisMessage = chunkPayload.length;
+        HANDLER_LOGGER.info(">>> SERVER: handleMessage LLAMADO con un Mensaje de {} bytes", bytesInThisMessage);
 
-        if (bytesInThisChunk == 0 && currentTotalBytesReceived.get() == 0 && startTimeReception == 0) {
-            HANDLER_LOGGER.warn(">>> SERVER: Recibido chunk vacío inicial. Ignorando para estadísticas.");
+        if (bytesInThisMessage == 0 && currentTotalBytesReceived.get() == 0 && startTimeReception == 0) {
+            HANDLER_LOGGER.warn(">>> SERVER: Recibido mensaje vacío inicial. Ignorando para estadísticas.");
             return; 
         }
         
-        if (startTimeReception == 0 && bytesInThisChunk > 0) { 
+        if (startTimeReception == 0 && bytesInThisMessage > 0) { 
             startTimeReception = System.nanoTime();
             HANDLER_LOGGER.info("⏱️  Recepción de Bloque Iniciada...");
         }
 
-        long newTotal = currentTotalBytesReceived.addAndGet(bytesInThisChunk);
-        int currentChunkCount = chunkCount.incrementAndGet();
+        long newTotal = currentTotalBytesReceived.addAndGet(bytesInThisMessage);
+        int currentMessageCount = individualChunkCounter.incrementAndGet(); // Usar el contador renombrado
 
-        // No loguear progreso por chunk para reducir la carga de logs
-        // if (bytesInThisChunk > 0 && currentChunkCount % 500 == 0 && newTotal < EXPECTED_TOTAL_BYTES) {
-        //     HANDLER_LOGGER.info("   ... {} bytes recibidos en este chunk (chunk #{}), Total acumulado: {} bytes.",
-        //         bytesInThisChunk, currentChunkCount, newTotal);
-        // }
+        // Loguear progreso cada X mensajes recibidos por handleMessage
+        if (bytesInThisMessage > 0 && currentMessageCount % 100 == 0 && newTotal < EXPECTED_TOTAL_BYTES) {
+            HANDLER_LOGGER.info("   ... {} bytes recibidos en este Mensaje (Mensaje #{}), Total acumulado: {} bytes.",
+                bytesInThisMessage, currentMessageCount, newTotal);
+        }
 
         boolean allBytesExpected = (newTotal >= EXPECTED_TOTAL_BYTES);
-        boolean eofDetected = (bytesInThisChunk == 0 && currentTotalBytesReceived.get() > 0 && startTimeReception > 0 && currentChunkCount > 1);
+        // EOF lo manejaremos por el cierre de conexión del cliente
+        // No esperamos un mensaje de 0 bytes para finalizar si ya se alcanzó el total.
 
-        if (allBytesExpected || eofDetected) {
-            // ... (resto de la lógica de estadísticas y reset como estaba) ...
-            if (eofDetected && !allBytesExpected) {
-                HANDLER_LOGGER.warn("   Finalizando por chunk vacío (EOF?) antes de alcanzar {} bytes esperados. Total recibido: {}", EXPECTED_TOTAL_BYTES, newTotal);
-            }
+        if (allBytesExpected) {
             long endTimeReception = System.nanoTime();
             if (startTimeReception == 0) { 
                  HANDLER_LOGGER.error("Error: Finalizando estadísticas pero startTimeReception es 0.");
                  currentTotalBytesReceived.set(0);
-                 chunkCount.set(0);
+                 individualChunkCounter.set(0);
                  return;
             }
             long duration = endTimeReception - startTimeReception;
             long finalTotalBytes = currentTotalBytesReceived.get(); 
+
             double durationSeconds = duration / 1_000_000_000.0;
             double megabytes = finalTotalBytes / (1024.0 * 1024.0);
             double mbps = (durationSeconds > 0) ? megabytes / durationSeconds : 0;
             double mbitps = mbps * 8;
-            int effectiveChunkCount = eofDetected ? currentChunkCount -1 : currentChunkCount;
-            if(effectiveChunkCount <= 0) effectiveChunkCount = 1; 
-            double averageBytesPerChunk = (double) finalTotalBytes / effectiveChunkCount;
+            double averageBytesPerMessage = (currentMessageCount > 0) ? (double) finalTotalBytes / currentMessageCount : 0;
 
             HANDLER_LOGGER.info("-------------------------------------------------");
             HANDLER_LOGGER.info("📊 Recepción de Bloque Completada:");
             HANDLER_LOGGER.info("   Velocidad: {} MB/s ({} Mbps)", String.format("%.2f", mbps), String.format("%.2f", mbitps));
             HANDLER_LOGGER.info("--- ESTADÍSTICAS REQUERIDAS (Bloque) ---");
             HANDLER_LOGGER.info("   Total sum of read bytes: {}", finalTotalBytes);
-            HANDLER_LOGGER.info("   Number of read buffer (chunks): {}", currentChunkCount); 
-            HANDLER_LOGGER.info("   average bytes per chunk (datos): {}", String.format("%.2f", averageBytesPerChunk));
+            HANDLER_LOGGER.info("   Number of messages processed: {}", currentMessageCount); 
+            HANDLER_LOGGER.info("   average bytes per message: {}", String.format("%.2f", averageBytesPerMessage));
             HANDLER_LOGGER.info("-------------------------------------------------");
 
             startTimeReception = 0;
             currentTotalBytesReceived.set(0);
-            chunkCount.set(0);
+            individualChunkCounter.set(0);
         }
     }
 }
