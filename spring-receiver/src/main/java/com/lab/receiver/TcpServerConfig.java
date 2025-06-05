@@ -21,7 +21,7 @@ public class TcpServerConfig {
 
     private static final Logger LOGGER_HANDLER = LoggerFactory.getLogger(TcpServerConfig.class.getName() + ".MessageCountingHandler");
     private static final int PORT = 12345;
-    private static final int BUFFER_SIZE = 131072; // 128 KB
+    private static final int BUFFER_SIZE = 131072;
     private static final long EXPECTED_TOTAL_BYTES = 82178160L;
 
     private final AtomicLong currentTotalBytesReceived = new AtomicLong(0);
@@ -33,12 +33,9 @@ public class TcpServerConfig {
         TcpNioServerConnectionFactory factory = new TcpNioServerConnectionFactory(PORT);
         factory.setSerializer(new ByteArrayRawSerializer());
         factory.setDeserializer(new ByteArrayRawSerializer());
-        factory.setSoTimeout(30000); // Timeout para la conexión
-
-        // Configuración de búferes para Spring
+        factory.setSoTimeout(30000);
         factory.setSoReceiveBufferSize(BUFFER_SIZE);
         factory.setSoSendBufferSize(BUFFER_SIZE);
-
         System.out.println("-> Fábrica de Conexiones TCP Creada en Puerto " + PORT + " (Raw Serializer)");
         System.out.println("   -> Búfer Solicitado Envío/Recepción: " + BUFFER_SIZE + " bytes");
         return factory;
@@ -59,6 +56,9 @@ public class TcpServerConfig {
 
     @ServiceActivator(inputChannel = "inboundTcpChannel")
     public void handleMessage(Message<byte[]> message) {
+        // *** CAMBIO: Log al inicio del método ***
+        LOGGER_HANDLER.info(">>> SERVER: handleMessage LLAMADO con un chunk de {} bytes", message.getPayload().length);
+
         if (startTimeReception == 0) {
             startTimeReception = System.nanoTime();
             LOGGER_HANDLER.info("⏱️  Recepción de Bloque Iniciada...");
@@ -69,7 +69,7 @@ public class TcpServerConfig {
         long newTotal = currentTotalBytesReceived.addAndGet(bytesInThisChunk);
         int currentChunkCount = chunkCount.incrementAndGet();
 
-        if (currentChunkCount % 500 == 0 && newTotal < EXPECTED_TOTAL_BYTES) { // Loguea progreso cada 500 chunks
+        if (currentChunkCount % 500 == 0 && newTotal < EXPECTED_TOTAL_BYTES) {
             LOGGER_HANDLER.info("   ... {} bytes recibidos en este chunk (chunk #{}), Total acumulado: {} bytes.",
                 bytesInThisChunk, currentChunkCount, newTotal);
         }
