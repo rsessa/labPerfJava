@@ -9,7 +9,7 @@ import org.slf4j.LoggerFactory;
 public class MinaClientHandler extends IoHandlerAdapter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MinaClientHandler.class);
-    private final String messageToSend;
+    private final String messageToSend; // Este mensaje se enviará al abrir la sesión
 
     public MinaClientHandler(String messageToSend) {
         this.messageToSend = messageToSend;
@@ -20,37 +20,44 @@ public class MinaClientHandler extends IoHandlerAdapter {
         IoSessionConfig config = session.getConfig();
 
         LOGGER.info("-------------------------------------------------");
-        LOGGER.info("ℹ️  MINA Session Configuration:");
-        LOGGER.info("   -> Read Buffer Size: {} bytes", config.getReadBufferSize());
-        LOGGER.info("   -> Min Read Buffer Size: {} bytes", config.getMinReadBufferSize());
-        LOGGER.info("   -> Max Read Buffer Size: {} bytes", config.getMaxReadBufferSize());
+        LOGGER.info("ℹ️  MINA Session Configuration (Cliente):");
+        LOGGER.info("   -> Read Buffer Size (MINA app): {} bytes", config.getReadBufferSize());
+        LOGGER.info("   -> Min Read Buffer Size (MINA app): {} bytes", config.getMinReadBufferSize());
+        LOGGER.info("   -> Max Read Buffer Size (MINA app): {} bytes", config.getMaxReadBufferSize());
         LOGGER.info("   -> Throughput Calculation Interval: {} seconds", config.getThroughputCalculationInterval());
-        LOGGER.info("   -> Note: Actual TCP socket buffers (SO_SNDBUF/SO_RCVBUF) use OS defaults");
+        LOGGER.info("   -> Nota: Los buffers TCP del Socket real (SO_SNDBUF/SO_RCVBUF) usarán los defaults del SO.");
         LOGGER.info("-------------------------------------------------");
 
-        LOGGER.info("ℹ️ MINA session opened (ID: {}). Sending message...", session.getId());
-        session.write(messageToSend);
+        LOGGER.info("CLIENT HANDLER - ℹ️ Sesión MINA abierta (ID: {}). Enviando mensaje inicial...", session.getId());
+        if (this.messageToSend != null && !this.messageToSend.isEmpty()) {
+            session.write(this.messageToSend); // Envía el mensaje pequeño
+        }
     }
 
     @Override
     public void messageReceived(IoSession session, Object message) throws Exception {
-        LOGGER.info("💬 Mensaje recibido del servidor: {}", message.toString());
-        session.closeNow();
+        LOGGER.info("CLIENT HANDLER - 💬 Mensaje recibido del servidor: {}", message.toString());
+        // El cliente no espera respuestas en este escenario de envío masivo,
+        // pero si las hubiera, se manejarían aquí.
     }
 
     @Override
     public void exceptionCaught(IoSession session, Throwable cause) throws Exception {
-        LOGGER.error("❌ Error en MINA (Sesión ID: {}): {}", session.getId(), cause.getMessage(), cause);
+        LOGGER.error("CLIENT HANDLER - ❌ Error en MINA (Sesión ID: {}): {}", session.getId(), cause.getMessage(), cause);
         session.closeNow();
     }
 
     @Override
     public void sessionClosed(IoSession session) throws Exception {
-        LOGGER.info("🚪 Sesión MINA cerrada (ID: {}).", session.getId());
+        LOGGER.info("CLIENT HANDLER - 🚪 Sesión MINA cerrada (ID: {}).", session.getId());
     }
 
     @Override
     public void messageSent(IoSession session, Object message) throws Exception {
-        LOGGER.info("✈️  >>> Mensaje Enviado: {}", message.toString().trim());
+        // Este se llamará para el messageToSend y para cada chunk del IoBuffer
+        // si no se usa un codec específico para el messageToSend que lo convierta a IoBuffer.
+        // Si messageToSend es un String y no hay un TextLineCodec, podría dar error o no llamarse.
+        // Para el IoBuffer, el LoggingFilter dará más info.
+        LOGGER.info("CLIENT HANDLER - ✈️  MINA ha procesado el envío de: {}", message.getClass().getSimpleName());
     }
 }
