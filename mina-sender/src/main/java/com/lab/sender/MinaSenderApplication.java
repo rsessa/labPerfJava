@@ -1,138 +1,94 @@
 package com.lab.sender;
 
-import org.apache.mina.core.buffer.IoBuffer;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
 import org.apache.mina.core.future.ConnectFuture;
-import org.apache.mina.core.future.WriteFuture;
-import org.apache.mina.core.service.IoHandlerAdapter; // Usaremos este directamente
+import org.apache.mina.core.service.IoHandlerAdapter;
 import org.apache.mina.core.session.IoSession;
-import org.apache.mina.filter.logging.LoggingFilter;
+import org.apache.mina.filter.codec.ProtocolCodecFilter;
+import org.apache.mina.filter.codec.textline.TextLineCodecFactory;
 import org.apache.mina.transport.socket.nio.NioSocketConnector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.net.InetSocketAddress;
-import java.util.Arrays;
 
 public class MinaSenderApplication {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MinaSenderApplication.class);
     private static final String HOST = "localhost";
     private static final int PORT = 12345;
-    private static final int TOTAL_BYTES_TO_SEND = 82178160;
+    private static final int MESSAGE_COUNT = 100000;
     private static final long CONNECT_TIMEOUT = 30000;
-    private static final int CHUNK_SIZE = 65536; 
-    private static final long CHUNK_WRITE_TIMEOUT = 25000;
 
     public static void main(String[] args) {
-        LOGGER.info("🚀 Cliente MINA (Chunks SÚPER Simplificado). Chunks: {} bytes, Timeout/chunk: {}ms", CHUNK_SIZE, CHUNK_WRITE_TIMEOUT);
+        LOGGER.info("🚀 Iniciando Cliente TCP Apache MINA (Enviando {} mensajes pequeños)...", MESSAGE_COUNT);
 
         NioSocketConnector connector = new NioSocketConnector();
         connector.setConnectTimeoutMillis(CONNECT_TIMEOUT);
-        connector.getFilterChain().addLast("logger", new LoggingFilter());
 
-        // *** USAREMOS UN IoHandlerAdapter VACÍO O CON LOGS MÍNIMOS ***
+        connector.getFilterChain().addLast("codec", new ProtocolCodecFilter(new TextLineCodecFactory(StandardCharsets.UTF_8)));
+        // Opcional: añadir el logger para ver más detalle
+        // connector.getFilterChain().addLast("logger", new LoggingFilter());
+
+        // Usar un handler simple inline en lugar de MinaClientHandler
         connector.setHandler(new IoHandlerAdapter() {
             @Override
-            public void sessionOpened(IoSession session) {
-                LOGGER.info("MINA IoHandler - Sesión ABIERTA: {}", session.getId());
+            public void exceptionCaught(IoSession session, Throwable cause) throws Exception {
+                LOGGER.error("❌ Error en MINA: {}", cause.getMessage());
+                session.closeNow();
             }
-            @Override
-            public void sessionClosed(IoSession session) {
-                LOGGER.info("MINA IoHandler - Sesión CERRADA: {}", session.getId());
-            }
-            @Override
-            public void exceptionCaught(IoSession session, Throwable cause) {
-                LOGGER.error("MINA IoHandler - EXCEPCIÓN: {} en sesión {}", cause.getMessage(), session.getId(), cause);
-                session.closeNow(); // Importante cerrar si hay excepción no manejada
-            }
-            // No necesitamos messageSent ni messageReceived para este test de envío
         });
 
-        IoSession session = null;
-        long totalBytesSuccessfullyWritten = 0;
-        long startTimeTotal = 0; // Para medir el tiempo total de envío
-        int chunkCounter = 0;
-
         try {
-            LOGGER.info("CLIENTE MAIN - Conectando a {}:{}...", HOST, PORT);
-            ConnectFuture connectFuture = connector.connect(new InetSocketAddress(HOST, PORT));
-            connectFuture.awaitUninterruptibly();
+            ConnectFuture future = connector.connect(new InetSocketAddress(HOST, PORT));
+            future.awaitUninterruptibly();
 
-            if (!connectFuture.isConnected()) {
-                LOGGER.error("CLIENTE MAIN - 🔥 No se pudo conectar.");
+            if (!future.isConnected()) {
+                LOGGER.error("🔥 No se pudo conectar al servidor.");
                 return;
             }
-            session = connectFuture.getSession();
-            LOGGER.info("CLIENTE MAIN - 🔗 Conectado. Sesión ID: {}. Preparando envío.", session.getId());
 
-            byte[] fullDataArray = new byte[TOTAL_BYTES_TO_SEND];
-            // Arrays.fill(fullDataArray, (byte) 'S');
+            IoSession session = future.getSession();
+            LOGGER.info("🔗 Conexión establecida. Sesión ID: {}. Enviando mensajes...", session.getId());
+            long startTime = System.nanoTime();
 
-            startTimeTotal = System.nanoTime(); // Inicia cronómetro general
-
-            for (int offset = 0; offset < TOTAL_BYTES_TO_SEND; offset += CHUNK_SIZE) {
-                if (!session.isConnected() || session.isClosing()) {
-                    LOGGER.warn("CLIENTE MAIN - Sesión cerrada o cerrándose antes de enviar chunk #{}. Bytes enviados: {}", chunkCounter + 1, totalBytesSuccessfullyWritten);
-                    break;
-                }
-
-                int length = Math.min(CHUNK_SIZE, TOTAL_BYTES_TO_SEND - offset);
-                IoBuffer chunkBuffer = IoBuffer.allocate(length);
-                chunkBuffer.put(fullDataArray, offset, length);
-                chunkBuffer.flip();
-                chunkCounter++;
-                
-                // LOGGER.info("CLIENTE MAIN - Intentando enviar chunk #{} ({} bytes)...", chunkCounter, length); // Reducir logs
-                WriteFuture writeFuture = session.write(chunkBuffer);
-
-                if (!writeFuture.awaitUninterruptibly(CHUNK_WRITE_TIMEOUT)) {
-                     LOGGER.error("CLIENTE MAIN - 🔥 TIMEOUT ({}ms) enviando chunk #{}", CHUNK_WRITE_TIMEOUT, chunkCounter);
-                     throw new Exception("Timeout en escritura de chunk #" + chunkCounter);
-                }
-                if(!writeFuture.isWritten()){
-                    LOGGER.error("CLIENTE MAIN - 🔥 FALLÓ escritura del chunk #{}", chunkCounter);
-                    if(writeFuture.getException() != null) {
-                        LOGGER.error("   Excepción en WriteFuture para chunk #{}: ", chunkCounter, writeFuture.getException());
-                    }
-                    throw new Exception("Fallo en escritura de chunk #" + chunkCounter);
-                }
-                totalBytesSuccessfullyWritten += length;
-                if (chunkCounter % 100 == 0) { // Loguear progreso
-                    LOGGER.info("CLIENTE MAIN - Chunk #{} enviado. Total escrito: {} bytes", chunkCounter, totalBytesSuccessfullyWritten);
-                }
+            String payload = "Este es un mensaje de prueba con algo de contenido para rellenar.";
+            for (int i = 0; i < MESSAGE_COUNT; i++) {
+                String message = payload + " #" + i;
+                session.write(message);
             }
 
-            long endTimeTotal = System.nanoTime();
-            if (totalBytesSuccessfullyWritten > 0) { // Solo mostrar estadísticas si se envió algo
-                long duration = endTimeTotal - startTimeTotal;
-                double durationSeconds = duration / 1_000_000_000.0;
-                double megabytes = totalBytesSuccessfullyWritten / (1024.0 * 1024.0);
-                double mbps = (durationSeconds > 0) ? megabytes / durationSeconds : 0;
-                double mbitps = mbps * 8;
+            // Enviar mensaje final para indicar que terminamos
+            session.write("END_OF_TRANSMISSION").awaitUninterruptibly();
+            
+            // Damos un pequeño margen para el último envío y luego cerramos.
+            Thread.sleep(2000);
+            LOGGER.info("Todos los mensajes han sido enviados a la cola. Cerrando sesión...");
 
-                LOGGER.info("-------------------------------------------------");
-                LOGGER.info("📊 Envío en Chunks Completado:");
-                LOGGER.info("   Chunks Enviados (intentados): {}", chunkCounter);
-                LOGGER.info("   Bytes Totales Escritos (confirmados por WriteFuture): {}", totalBytesSuccessfullyWritten);
-                LOGGER.info("   Tiempo Transcurrido Total: {} ms ({} s)", duration / 1_000_000, String.format("%.3f", durationSeconds));
-                LOGGER.info("   Velocidad: {} MB/s ({} Mbps)", String.format("%.2f", mbps), String.format("%.2f", mbitps));
-                LOGGER.info("-------------------------------------------------");
-            }
+            session.closeNow().awaitUninterruptibly();
 
+            long endTime = System.nanoTime();
+            long duration = endTime - startTime;
+            double durationSeconds = duration / 1_000_000_000.0;
+            long totalBytesApprox = (long) MESSAGE_COUNT * (payload.length() + 8);
+            double mbps = (durationSeconds > 0) ? (totalBytesApprox * 8 / (1024.0 * 1024.0)) / durationSeconds : 0;
 
-        } catch (Exception e) {
-            LOGGER.error("CLIENTE MAIN - 🔥 Error en bucle de envío o conexión: {}", e.getMessage());
+            LOGGER.info("-------------------------------------------------");
+            LOGGER.info("📊 Envío de Mensajes Pequeños Completado:");
+            LOGGER.info("   Mensajes Enviados: {}", MESSAGE_COUNT);
+            LOGGER.info("   Bytes Totales (aprox): {}", totalBytesApprox);
+            LOGGER.info("   Tiempo Transcurrido: {} ms ({} s)", duration / 1_000_000, String.format("%.3f", durationSeconds));
+            LOGGER.info("   Velocidad: {} MB/s ({} Mbps)", String.format("%.2f", mbps/8), String.format("%.2f", mbps));
+            LOGGER.info("-------------------------------------------------");
+
+        } catch (InterruptedException e) {
+            LOGGER.error("🔥 Error de interrupción durante el envío: {}", e.getMessage(), e);
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+            LOGGER.error("🔥 Error de runtime durante el envío: {}", e.getMessage(), e);
         } finally {
-            if (session != null) {
-                if (session.isConnected() || session.isClosing() ) {
-                     LOGGER.info("CLIENTE MAIN - Finalizando. Solicitando cierre de sesión con flush...");
-                     session.closeOnFlush().awaitUninterruptibly(5000);
-                } else {
-                    LOGGER.info("CLIENTE MAIN - Finalizando. Sesión ya estaba cerrada.");
-                }
-            }
-            if (connector != null && !connector.isDisposed()) {
-                LOGGER.info("CLIENTE MAIN - Disponiendo del conector...");
+            if (!connector.isDisposed()) { // Eliminada verificación innecesaria de null
+                LOGGER.info("Cliente: Limpiando y disponiendo del conector...");
                 connector.dispose(true);
             }
             LOGGER.info("🧹 Cliente finalizado.");
